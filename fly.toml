@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for acervo-worker on 2026-02-24T10:02:16Z
+# fly.toml app configuration file generated for acervo-worker on 2026-02-24T11:47:55Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'acervo-worker'
-primary_region = 'usa'
+primary_region = 'iad'
 
 [build]
 
@@ -20,4 +20,4 @@ primary_region = 'usa'
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 2048
+  memory_mb = 1024
