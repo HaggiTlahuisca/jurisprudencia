@@ -18,7 +18,16 @@ from dotenv import load_dotenv
 load_dotenv()
 client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# --- LAZY GLOBALS (initialized in startup_event, not at import time) ---
+client_mongo = None
+db = None
+coleccion = None
+cola = None
+meta = None
+
+
 def conectar_mongo():
+    """Retries forever until MongoDB is reachable. Call from a background thread."""
     while True:
         try:
             client = MongoClient(os.getenv("MONGO_URI"), serverSelectionTimeoutMS=5000)
@@ -29,11 +38,6 @@ def conectar_mongo():
             print(f"⚠️ Error conectando a MongoDB, reintentando: {e}")
             time.sleep(5)
 
-client_mongo = conectar_mongo()
-db = client_mongo["tepantlatia_db"]
-coleccion = db["acervo_historico"]
-cola = db["cola_tesis"]
-meta = db["meta"]
 
 URL_BASE = "https://bicentenario.scjn.gob.mx/repositorio-scjn/api/v1/tesis/"
 
@@ -351,6 +355,15 @@ def procesar_registro(doc_cola):
 
 
 def worker_loop():
+    global client_mongo, db, coleccion, cola, meta
+
+    # Connect to MongoDB (retries until successful) — runs in background thread
+    client_mongo = conectar_mongo()
+    db = client_mongo["tepantlatia_db"]
+    coleccion = db["acervo_historico"]
+    cola = db["cola_tesis"]
+    meta = db["meta"]
+
     cargar_leyes_fundamentales()
     corregir_materias_existentes()
     inicializar_cola()
@@ -375,6 +388,15 @@ def dashboard(
     epoca: str | None = Query(default=None),
     materia: str | None = Query(default=None),
 ):
+    # Guard: if DB isn't connected yet, show a loading page
+    if cola is None:
+        return HTMLResponse(
+            "<html><body><h1>⏳ Conectando a la base de datos...</h1>"
+            "<p>El worker está iniciando. Recarga en unos segundos.</p>"
+            '<meta http-equiv="refresh" content="5"></body></html>',
+            status_code=503,
+        )
+
     total = cola.count_documents({})
     pendientes = cola.count_documents({"estado": "pendiente"})
     procesando = cola.count_documents({"estado": "procesando"})
@@ -457,6 +479,8 @@ def dashboard(
 
 @app.post("/reintentar-errores")
 def endpoint_reintentar_errores(limit: int | None = Query(default=None, ge=1)):
+    if cola is None:
+        return JSONResponse({"error": "DB no conectada aún"}, status_code=503)
     count = reintentar_errores(limit=limit)
     return JSONResponse(
         {"mensaje": "Reintentos programados", "reintentos": count, "limit": limit}
@@ -464,15 +488,16 @@ def endpoint_reintentar_errores(limit: int | None = Query(default=None, ge=1)):
 
 
 # ============================
-# 9. ARRANQUE DEL WORKER (CORREGIDO)
+# 9. ARRANQUE
 # ============================
-
-def iniciar_worker_en_background():
-    hilo = threading.Thread(target=worker_loop, daemon=True)
-    hilo.start()
-    print("🚀 Worker iniciado en background.")
-
 
 @app.on_event("startup")
 def startup_event():
-    iniciar_worker_en_background()
+    """
+    Uvicorn binds to 0.0.0.0:8080 FIRST, then this runs.
+    The worker (including MongoDB connection) starts in a daemon thread,
+    so a slow/failing DB never blocks the HTTP server from starting.
+    """
+    hilo = threading.Thread(target=worker_loop, daemon=True)
+    hilo.start()
+    print("🚀 Worker iniciado en background.")
