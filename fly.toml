@@ -1,4 +1,4 @@
-app = "tepantlatia-worker"
+app = "acervo-worker"
 primary_region = "lax"
 
 [build]
