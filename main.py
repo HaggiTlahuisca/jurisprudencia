@@ -63,20 +63,25 @@ def obtener_vector(texto: str):
 # ============================
 
 def extraer_materia(data):
-    materia = data.get("materia")
+    # Soportar tanto "materias" (lista) como "materia" (string/objeto)
+    materia = data.get("materias") or data.get("materia")
 
     if not materia:
         return "N/A"
 
+    # Caso 1: string directo
     if isinstance(materia, str):
         return materia
 
+    # Caso 2: lista de strings
     if isinstance(materia, list) and all(isinstance(x, str) for x in materia):
         return ", ".join(materia)
 
+    # Caso 3: objeto con clave/descripcion
     if isinstance(materia, dict):
         return materia.get("descripcion") or materia.get("clave") or "N/A"
 
+    # Caso 4: lista de objetos
     if isinstance(materia, list) and all(isinstance(x, dict) for x in materia):
         return ", ".join(
             x.get("descripcion") or x.get("clave") or "N/A"
