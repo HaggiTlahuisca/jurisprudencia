@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 
 import requests
-from pymongo import MongoClient, ReturnDocument
+from pymongo.mongo_client import MongoClient, ReturnDocument
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from openai import OpenAI
