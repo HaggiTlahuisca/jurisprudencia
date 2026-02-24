@@ -87,20 +87,22 @@ def extraer_materia(data):
 
 
 # ============================
-# 4. CORRECCIÓN MASIVA DE TESIS CON MATERIA N/A
+# 4. CORRECCIÓN MASIVA DE TESIS EXISTENTES
 # ============================
 
 def corregir_materias_existentes():
     print("🔍 Buscando tesis con materia 'N/A' para corregir...")
 
-    cursor = coleccion.find({"materia": "N/A", "procesado": True})
-    total = cursor.count()
+    filtro = {"materia": "N/A", "procesado": True}
+    total = coleccion.count_documents(filtro)
 
     if total == 0:
         print("✅ No hay tesis que corregir.")
         return
 
     print(f"🔧 Se encontraron {total} tesis sin materia. Corrigiendo...")
+
+    cursor = coleccion.find(filtro)
 
     for doc in cursor:
         registro = doc["registro"]
@@ -172,9 +174,9 @@ def cargar_leyes_fundamentales():
 # ============================
 
 BLOQUES = [
-    (206000, 207000),
-    (160000, 161000),
-    (2023000, 2028000),
+    (200000, 207000),
+    (160000, 169999),
+    (2011000, 2029000),
 ]
 
 def inicializar_cola():
