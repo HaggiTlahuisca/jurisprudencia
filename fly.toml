@@ -8,14 +8,14 @@ primary_region = "lax"
   PYTHONUNBUFFERED = "1"
 
 [http_service]
-  internal_port = 8000
+  internal_port = 8080
   force_https = true
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
 
 [[services]]
-  internal_port = 8000
+  internal_port = 8080
   protocol = "tcp"
 
   [[services.ports]]
@@ -33,7 +33,7 @@ primary_region = "lax"
 
 [checks]
   [checks.health]
-    port = 8000
+    port = 8080
     type = "http"
     interval = "15s"
     timeout = "5s"
