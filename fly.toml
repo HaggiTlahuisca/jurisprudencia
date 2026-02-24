@@ -4,7 +4,7 @@
 #
 
 app = 'acervo-worker'
-primary_region = 'ams'
+primary_region = 'usa'
 
 [build]
 
