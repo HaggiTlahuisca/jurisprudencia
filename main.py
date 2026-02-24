@@ -383,6 +383,15 @@ def worker_loop():
 # 8. DASHBOARD
 # ============================
 
+@app.get("/health")
+def health_check():
+    """
+    Siempre devuelve 200. Fly.io usa este endpoint para saber
+    si la máquina está viva — independientemente de MongoDB.
+    """
+    return JSONResponse({"status": "ok"})
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(
     epoca: str | None = Query(default=None),
