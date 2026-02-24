@@ -2,6 +2,7 @@ import os
 import time
 import threading
 from datetime import datetime
+from collections import deque
 
 import requests
 from pymongo.mongo_client import MongoClient
@@ -18,16 +19,14 @@ from dotenv import load_dotenv
 load_dotenv()
 client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- LAZY GLOBALS (initialized in startup_event, not at import time) ---
+# Lazy globals (se inicializan en el worker)
 client_mongo = None
 db = None
 coleccion = None
 cola = None
 meta = None
 
-
 def conectar_mongo():
-    """Retries forever until MongoDB is reachable. Call from a background thread."""
     while True:
         try:
             client = MongoClient(os.getenv("MONGO_URI"), serverSelectionTimeoutMS=5000)
@@ -38,11 +37,9 @@ def conectar_mongo():
             print(f"⚠️ Error conectando a MongoDB, reintentando: {e}")
             time.sleep(5)
 
-
 URL_BASE = "https://bicentenario.scjn.gob.mx/repositorio-scjn/api/v1/tesis/"
 
 app = FastAPI(title="Acervo Worker Dashboard")
-
 
 # ============================
 # 2. EMBEDDINGS
@@ -60,7 +57,6 @@ def obtener_vector(texto: str):
             print(f"❌ Error al vectorizar, reintentando: {e}")
             time.sleep(2)
     return None
-
 
 # ============================
 # 3. NORMALIZACIÓN DE MATERIA
@@ -89,9 +85,8 @@ def extraer_materia(data):
 
     return "N/A"
 
-
 # ============================
-# 4. CORRECCIÓN MASIVA DE TESIS EXISTENTES
+# 4. CORRECCIÓN MASIVA
 # ============================
 
 def corregir_materias_existentes():
@@ -133,13 +128,12 @@ def corregir_materias_existentes():
 
     print("🎉 Corrección de materias completada.")
 
-
 # ============================
 # 5. LEYES FUNDAMENTALES
 # ============================
 
 def cargar_leyes_fundamentales():
-    print("⚖️ Cargando leyes fundamentales...")
+    print("🧠 Cargando leyes fundamentales...")
 
     leyes = [
         {
@@ -160,7 +154,7 @@ def cargar_leyes_fundamentales():
 
     for ley in leyes:
         if coleccion.find_one({"registro": ley["registro"], "procesado": True}):
-            print(f"⏭️ Ley ya procesada: {ley['registro']}")
+            print(f"📜 Ley ya procesada: {ley['registro']}")
             continue
 
         vector = obtener_vector(f"{ley['rubro']} {ley['texto']}")
@@ -170,8 +164,7 @@ def cargar_leyes_fundamentales():
             coleccion.update_one(
                 {"registro": ley["registro"]}, {"$set": ley}, upsert=True
             )
-            print(f"✅ Ley cargada: {ley['rubro']}")
-
+            print(f"📜 Ley cargada: {ley['rubro']}")
 
 # ============================
 # 6. SISTEMA DE COLAS
@@ -204,12 +197,10 @@ BLOQUES = [
     (1450000, 1500000),
     (1500000, 1550000),
     (1550000, 1600000),
-
     (161000, 206000),
     (207000, 2023000),
     (2028000, 2031780),
 ]
-
 
 def inicializar_cola():
     existente = meta.find_one({"tipo": "cola_inicializada"})
@@ -253,7 +244,6 @@ def inicializar_cola():
 
     print("✅ Cola inicializada.")
 
-
 def tomar_siguiente_de_cola():
     return cola.find_one_and_update(
         {"estado": "pendiente"},
@@ -264,13 +254,11 @@ def tomar_siguiente_de_cola():
         return_document=ReturnDocument.AFTER,
     )
 
-
 def marcar_completado(registro: str):
     cola.update_one(
         {"registro": registro},
         {"$set": {"estado": "completado", "completado_en": datetime.utcnow()}},
     )
-
 
 def marcar_error(registro: str, mensaje: str):
     cola.update_one(
@@ -284,21 +272,8 @@ def marcar_error(registro: str, mensaje: str):
         },
     )
 
-
-def reintentar_errores(limit: int | None = None):
-    cursor = cola.find({"estado": "error"}).limit(limit or 0)
-    count = 0
-    for doc in cursor:
-        cola.update_one(
-            {"_id": doc["_id"]},
-            {"$set": {"estado": "pendiente", "reintentado_en": datetime.utcnow()}},
-        )
-        count += 1
-    return count
-
-
 # ============================
-# 7. WORKER PRINCIPAL
+# 7. WORKER PRINCIPAL (CON TPS)
 # ============================
 
 def procesar_registro(doc_cola):
@@ -326,7 +301,7 @@ def procesar_registro(doc_cola):
             print(f"⚠️ {registro_id}: sin rubro o texto")
             return
 
-        print(f"🧠 Procesando {registro_id}...")
+        print(f"🔄 Procesando {registro_id}...")
         vector = obtener_vector(f"{rubro} {texto}")
         if not vector:
             marcar_error(registro_id, "Error al vectorizar")
@@ -353,11 +328,9 @@ def procesar_registro(doc_cola):
         print(f"⚠️ Error en {registro_id}: {e}")
         marcar_error(registro_id, str(e))
 
-
 def worker_loop():
     global client_mongo, db, coleccion, cola, meta
 
-    # Connect to MongoDB (retries until successful) — runs in background thread
     client_mongo = conectar_mongo()
     db = client_mongo["tepantlatia_db"]
     coleccion = db["acervo_historico"]
@@ -368,6 +341,9 @@ def worker_loop():
     corregir_materias_existentes()
     inicializar_cola()
 
+    # --- TPS (tesis por segundo) ---
+    tiempos = deque(maxlen=20)
+
     while True:
         doc = tomar_siguiente_de_cola()
         if not doc:
@@ -376,8 +352,13 @@ def worker_loop():
             continue
 
         procesar_registro(doc)
-        time.sleep(0.4)
+        tiempos.append(time.time())
 
+        if len(tiempos) >= 5:
+            tps = len(tiempos) / (tiempos[-1] - tiempos[0])
+            print(f"⚡ Velocidad: {tps:.2f} tesis/segundo")
+
+        time.sleep(0.4)
 
 # ============================
 # 8. DASHBOARD
@@ -385,24 +366,18 @@ def worker_loop():
 
 @app.get("/health")
 def health_check():
-    """
-    Siempre devuelve 200. Fly.io usa este endpoint para saber
-    si la máquina está viva — independientemente de MongoDB.
-    """
     return JSONResponse({"status": "ok"})
-
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(
     epoca: str | None = Query(default=None),
     materia: str | None = Query(default=None),
 ):
-    # Guard: if DB isn't connected yet, show a loading page
     if cola is None:
         return HTMLResponse(
-            "<html><body><h1>⏳ Conectando a la base de datos...</h1>"
+            "<h1>⏳ Conectando a la base de datos...</h1>"
             "<p>El worker está iniciando. Recarga en unos segundos.</p>"
-            '<meta http-equiv="refresh" content="5"></body></html>',
+            '<meta http-equiv="refresh" content="5">',
             status_code=503,
         )
 
@@ -446,9 +421,6 @@ def dashboard(
             table {{ border-collapse: collapse; width: 100%; }}
             th, td {{ border: 1px solid #ddd; padding: 8px; font-size: 0.9rem; }}
             th {{ background: #eee; }}
-            form {{ margin-bottom: 1.5rem; }}
-            label {{ margin-right: 0.5rem; }}
-            input {{ margin-right: 1rem; }}
         </style>
     </head>
     <body>
@@ -460,15 +432,6 @@ def dashboard(
             <div class="card"><strong>Completados:</strong> {completados}</div>
             <div class="card"><strong>Errores:</strong> {errores}</div>
         </div>
-
-        <h2>Filtros</h2>
-        <form method="get" action="/">
-            <label>Época:</label>
-            <input type="text" name="epoca" value="{epoca or ''}" />
-            <label>Materia:</label>
-            <input type="text" name="materia" value="{materia or ''}" />
-            <button type="submit">Filtrar</button>
-        </form>
 
         <h2>Últimos 10 registros procesados</h2>
         <table>
@@ -485,28 +448,12 @@ def dashboard(
     """
     return html
 
-
-@app.post("/reintentar-errores")
-def endpoint_reintentar_errores(limit: int | None = Query(default=None, ge=1)):
-    if cola is None:
-        return JSONResponse({"error": "DB no conectada aún"}, status_code=503)
-    count = reintentar_errores(limit=limit)
-    return JSONResponse(
-        {"mensaje": "Reintentos programados", "reintentos": count, "limit": limit}
-    )
-
-
 # ============================
 # 9. ARRANQUE
 # ============================
 
 @app.on_event("startup")
 def startup_event():
-    """
-    Uvicorn binds to 0.0.0.0:8080 FIRST, then this runs.
-    The worker (including MongoDB connection) starts in a daemon thread,
-    so a slow/failing DB never blocks the HTTP server from starting.
-    """
     hilo = threading.Thread(target=worker_loop, daemon=True)
     hilo.start()
     print("🚀 Worker iniciado en background.")
