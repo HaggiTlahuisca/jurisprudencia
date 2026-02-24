@@ -7,9 +7,6 @@ primary_region = "lax"
 [env]
   PYTHONUNBUFFERED = "1"
 
-[processes]
-  worker = "python main.py"
-
 [http_service]
   internal_port = 8000
   force_https = true
@@ -33,10 +30,6 @@ primary_region = "lax"
     type = "requests"
     soft_limit = 100
     hard_limit = 200
-
-[machines]
-  auto_start = true
-  auto_stop = false
 
 [checks]
   [checks.health]
