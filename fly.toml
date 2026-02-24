@@ -7,9 +7,6 @@ primary_region = "lax"
 [env]
   PYTHONUNBUFFERED = "1"
 
-[processes]
-  worker = "python main.py"
-
 [http_service]
   internal_port = 8080
   force_https = true
