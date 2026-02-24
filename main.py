@@ -59,7 +59,77 @@ def obtener_vector(texto: str):
 
 
 # ============================
-# 3. LEYES FUNDAMENTALES
+# 3. NORMALIZACIÓN DE MATERIA
+# ============================
+
+def extraer_materia(data):
+    materia = data.get("materia")
+
+    if not materia:
+        return "N/A"
+
+    if isinstance(materia, str):
+        return materia
+
+    if isinstance(materia, list) and all(isinstance(x, str) for x in materia):
+        return ", ".join(materia)
+
+    if isinstance(materia, dict):
+        return materia.get("descripcion") or materia.get("clave") or "N/A"
+
+    if isinstance(materia, list) and all(isinstance(x, dict) for x in materia):
+        return ", ".join(
+            x.get("descripcion") or x.get("clave") or "N/A"
+            for x in materia
+        )
+
+    return "N/A"
+
+
+# ============================
+# 4. CORRECCIÓN MASIVA DE TESIS CON MATERIA N/A
+# ============================
+
+def corregir_materias_existentes():
+    print("🔍 Buscando tesis con materia 'N/A' para corregir...")
+
+    cursor = coleccion.find({"materia": "N/A", "procesado": True})
+    total = cursor.count()
+
+    if total == 0:
+        print("✅ No hay tesis que corregir.")
+        return
+
+    print(f"🔧 Se encontraron {total} tesis sin materia. Corrigiendo...")
+
+    for doc in cursor:
+        registro = doc["registro"]
+        try:
+            url = f"{URL_BASE}{registro}"
+            resp = requests.get(url, timeout=10)
+
+            if resp.status_code != 200:
+                print(f"⚠️ No se pudo corregir {registro}: HTTP {resp.status_code}")
+                continue
+
+            data = resp.json()
+            nueva_materia = extraer_materia(data)
+
+            coleccion.update_one(
+                {"registro": registro},
+                {"$set": {"materia": nueva_materia, "actualizado_en": datetime.utcnow()}}
+            )
+
+            print(f"🔧 Materia corregida para {registro}: {nueva_materia}")
+
+        except Exception as e:
+            print(f"⚠️ Error corrigiendo {registro}: {e}")
+
+    print("🎉 Corrección de materias completada.")
+
+
+# ============================
+# 5. LEYES FUNDAMENTALES
 # ============================
 
 def cargar_leyes_fundamentales():
@@ -98,7 +168,7 @@ def cargar_leyes_fundamentales():
 
 
 # ============================
-# 4. SISTEMA DE COLAS
+# 6. SISTEMA DE COLAS
 # ============================
 
 BLOQUES = [
@@ -108,7 +178,6 @@ BLOQUES = [
 ]
 
 def inicializar_cola():
-    """Llena la cola con registros pendientes si no existen."""
     existente = meta.find_one({"tipo": "cola_inicializada"})
     if existente:
         print("📦 Cola ya inicializada, no se vuelve a poblar.")
@@ -152,30 +221,20 @@ def inicializar_cola():
 
 
 def tomar_siguiente_de_cola():
-    """Toma un registro pendiente y lo marca como procesando."""
-    doc = cola.find_one_and_update(
+    return cola.find_one_and_update(
         {"estado": "pendiente"},
         {
-            "$set": {
-                "estado": "procesando",
-                "tomado_en": datetime.utcnow(),
-            },
+            "$set": {"estado": "procesando", "tomado_en": datetime.utcnow()},
             "$inc": {"intentos": 1},
         },
         return_document=ReturnDocument.AFTER,
     )
-    return doc
 
 
 def marcar_completado(registro: str):
     cola.update_one(
         {"registro": registro},
-        {
-            "$set": {
-                "estado": "completado",
-                "completado_en": datetime.utcnow(),
-            }
-        },
+        {"$set": {"estado": "completado", "completado_en": datetime.utcnow()}},
     )
 
 
@@ -193,26 +252,19 @@ def marcar_error(registro: str, mensaje: str):
 
 
 def reintentar_errores(limit: int | None = None):
-    """Pasa registros en error a pendiente para reintentar."""
-    filtro = {"estado": "error"}
-    cursor = cola.find(filtro).limit(limit or 0)
+    cursor = cola.find({"estado": "error"}).limit(limit or 0)
     count = 0
     for doc in cursor:
         cola.update_one(
             {"_id": doc["_id"]},
-            {
-                "$set": {
-                    "estado": "pendiente",
-                    "reintentado_en": datetime.utcnow(),
-                }
-            },
+            {"$set": {"estado": "pendiente", "reintentado_en": datetime.utcnow()}},
         )
         count += 1
     return count
 
 
 # ============================
-# 5. WORKER PRINCIPAL
+# 7. WORKER PRINCIPAL
 # ============================
 
 def procesar_registro(doc_cola):
@@ -251,12 +303,13 @@ def procesar_registro(doc_cola):
             "rubro": rubro,
             "texto": texto,
             "epoca": data.get("epoca", "N/A"),
-            "materia": data.get("materia", "N/A"),
+            "materia": extraer_materia(data),
             "vector_busqueda": vector,
             "fuente": "Repositorio Bicentenario",
             "procesado": True,
             "actualizado_en": datetime.utcnow(),
         }
+
         coleccion.update_one(
             {"registro": registro_id}, {"$set": documento}, upsert=True
         )
@@ -269,6 +322,7 @@ def procesar_registro(doc_cola):
 
 def worker_loop():
     cargar_leyes_fundamentales()
+    corregir_materias_existentes()   # 🔥 CORRECCIÓN MASIVA ANTES DE TODO
     inicializar_cola()
 
     while True:
@@ -283,7 +337,7 @@ def worker_loop():
 
 
 # ============================
-# 6. DASHBOARD (FastAPI)
+# 8. DASHBOARD
 # ============================
 
 @app.get("/", response_class=HTMLResponse)
@@ -380,7 +434,7 @@ def endpoint_reintentar_errores(limit: int | None = Query(default=None, ge=1)):
 
 
 # ============================
-# 7. ARRANQUE DEL WORKER EN BACKGROUND
+# 9. ARRANQUE DEL WORKER
 # ============================
 
 def iniciar_worker_en_background():
