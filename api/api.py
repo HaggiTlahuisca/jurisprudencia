@@ -1,6 +1,6 @@
-
 import os
 import time
+import threading
 from datetime import datetime
 
 from pymongo.mongo_client import MongoClient
@@ -19,6 +19,7 @@ db = None
 coleccion = None
 cola = None
 
+
 def conectar_mongo():
     while True:
         try:
@@ -30,14 +31,15 @@ def conectar_mongo():
             print(f"⚠️ Error conectando a MongoDB, reintentando: {e}")
             time.sleep(5)
 
-app = FastAPI(title="Acervo Worker Dashboard")
+
+app = FastAPI(title="Acervo API Dashboard")
+
 
 # ============================
-# DASHBOARD
+# STARTUP
 # ============================
 
-@app.on_event("startup")
-def startup_event():
+def conectar_en_background():
     global client_mongo, db, coleccion, cola
     client_mongo = conectar_mongo()
     db = client_mongo["tepantlatia_db"]
@@ -45,9 +47,26 @@ def startup_event():
     cola = db["cola_tesis"]
     print("🚀 API conectada a MongoDB.")
 
+
+@app.on_event("startup")
+def startup_event():
+    """
+    Lanza la conexión a MongoDB en un hilo secundario para que
+    uvicorn pueda empezar a responder /health de inmediato.
+    """
+    hilo = threading.Thread(target=conectar_en_background, daemon=True)
+    hilo.start()
+
+
+# ============================
+# ENDPOINTS
+# ============================
+
 @app.get("/health")
 def health_check():
+    """Siempre devuelve 200. Fly.io usa este endpoint para el health check."""
     return JSONResponse({"status": "ok"})
+
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(
@@ -56,9 +75,11 @@ def dashboard(
 ):
     if cola is None:
         return HTMLResponse(
+            "<html><body>"
             "<h1>⏳ Conectando a la base de datos...</h1>"
             "<p>La API está iniciando. Recarga en unos segundos.</p>"
-            '<meta http-equiv="refresh" content="5">',
+            '<meta http-equiv="refresh" content="5">'
+            "</body></html>",
             status_code=503,
         )
 
@@ -85,7 +106,7 @@ def dashboard(
         filas += (
             f"<tr>"
             f"<td>{d.get('registro')}</td>"
-            f"<td>{d.get('rubro')[:80]}...</td>"
+            f"<td>{d.get('rubro', '')[:80]}...</td>"
             f"<td>{d.get('epoca')}</td>"
             f"<td>{d.get('materia')}</td>"
             f"</tr>"
@@ -94,7 +115,7 @@ def dashboard(
     html = f"""
     <html>
     <head>
-        <title>Acervo Worker Dashboard</title>
+        <title>Acervo API Dashboard</title>
         <style>
             body {{ font-family: system-ui, sans-serif; margin: 2rem; }}
             .cards {{ display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap; }}
@@ -105,7 +126,7 @@ def dashboard(
         </style>
     </head>
     <body>
-        <h1>Acervo Worker Dashboard</h1>
+        <h1>Acervo API Dashboard</h1>
         <div class="cards">
             <div class="card"><strong>Total en cola:</strong> {total}</div>
             <div class="card"><strong>Pendientes:</strong> {pendientes}</div>
