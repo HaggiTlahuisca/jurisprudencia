@@ -2,7 +2,7 @@ app = "acervo-worker"
 primary_region = "lax"
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = "../Dockerfile"
 
 [env]
   PYTHONUNBUFFERED = "1"
