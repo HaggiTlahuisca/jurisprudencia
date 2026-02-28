@@ -6,79 +6,88 @@ from collections import deque
 
 import requests
 from dotenv import load_dotenv
-from pymongo.mongo_client import MongoClient
+from pymongo.mongoclient import MongoClient
 from pymongo import UpdateOne, ReturnDocument
 from openai import OpenAI
 
 load_dotenv()
 
 # =========================
-# Config
+# Config base
 # =========================
-MONGO_URI = os.getenv("MONGO_URI")
-DB_NAME = os.getenv("MONGODB_DB", "tepantlatia_db")
+MONGOURI = os.getenv("MONGOURI")
+DBNAME = os.getenv("MONGODBDB", "tepantlatia_db")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+OPENAIAPIKEY = os.getenv("OPENAIAPIKEY")
+EMBEDMODEL = os.getenv("EMBEDMODEL", "text-embedding-3-small")
 
-URL_BASE_TESIS = os.getenv(
-    "URL_BASE_TESIS",
+URLBASETESIS = os.getenv(
+    "URLBASETESIS",
     "https://bicentenario.scjn.gob.mx/repositorio-scjn/api/v1/tesis/",
 )
 
-SEED_TESIS_COLA = os.getenv("SEED_TESIS_COLA", "0").strip()
+if not MONGOURI:
+    raise RuntimeError("Falta MONGOURI.")
+if not OPENAIAPIKEY:
+    raise RuntimeError("Falta OPENAIAPIKEY.")
 
-VECTOR_SOLO_RANGO = os.getenv("VECTOR_SOLO_RANGO", "1").strip()
-VECTOR_ANIO_MIN = int(os.getenv("VECTOR_ANIO_MIN", "1980"))
-VECTOR_ANIO_MAX = int(os.getenv("VECTOR_ANIO_MAX", "2026"))
-VECTOR_SI_ANIO_DESCONOCIDO = os.getenv("VECTOR_SI_ANIO_DESCONOCIDO", "0").strip()
-
-if not MONGO_URI:
-    raise RuntimeError("Falta MONGO_URI.")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Falta OPENAI_API_KEY.")
-
-client_ai = OpenAI(api_key=OPENAI_API_KEY)
+clientai = OpenAI(api_key=OPENAIAPIKEY)
 http = requests.Session()
 
-RETRY_ATTEMPTS = int(os.getenv("RETRY_ATTEMPTS", "3"))
-RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.0"))
-RETRY_JITTER_MAX = float(os.getenv("RETRY_JITTER_MAX", "0.6"))
-RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+# =========================
+# Retries/backoff SCJN
+# =========================
+RETRYATTEMPTS = int(os.getenv("RETRYATTEMPTS", "3"))
+RETRYBACKOFFBASE = float(os.getenv("RETRYBACKOFFBASE", "1.0"))
+RETRYJITTERMAX = float(os.getenv("RETRYJITTERMAX", "0.6"))
+RETRYSTATUSCODES = {429, 500, 502, 503, 504}
 
-MAX_ERRORES_SCJN = int(os.getenv("MAX_ERRORES_SCJN", "40"))
-ESPERA_PAUSA_SCJN = int(os.getenv("ESPERA_PAUSA_SCJN", str(5 * 60)))
+MAXERRORESSCJN = int(os.getenv("MAXERRORESSCJN", "5"))
+ESPERAPAUSASCJN = int(os.getenv("ESPERAPAUSASCJN", str(20 * 60)))  # 20 min
 
-ESPERA_NORMAL = float(os.getenv("ESPERA_NORMAL", "0.35"))
-LOCK_STALE_MIN = int(os.getenv("LOCK_STALE_MIN", "30"))
+# Loop
+ESPERANORMAL = float(os.getenv("ESPERANORMAL", "0.35"))
+LOCKSTALEMIN = int(os.getenv("LOCKSTALEMIN", "30"))
 
-# Reintentos diferidos
+# Round-robin: 6 tesis por 1 TFJA
+WTESIS = int(os.getenv("WTESIS", "6"))
+WTFJA = int(os.getenv("WTFJA", "1"))
+SCHEDULE = (["tesis"] * WTESIS) + (["tfja"] * WTFJA)
+
+# =========================
+# Diferido / No disponible
+# =========================
 DIFERIDO_MINUTOS = int(os.getenv("DIFERIDO_MINUTOS", "60"))
 NO_DISPONIBLE_DIAS = int(os.getenv("NO_DISPONIBLE_DIAS", "3"))
 
-W_TESIS = int(os.getenv("W_TESIS", "6"))
-W_TFJA = int(os.getenv("W_TFJA", "1"))
-SCHEDULE = (["tesis"] * W_TESIS) + (["tfja"] * W_TFJA)
+# Siembra masiva (opcional)
+SEEDCOLATESIS = os.getenv("SEEDCOLATESIS", "0").strip()  # "1" para sembrar, "0" para NO
+
+# Vectorización por rango de años (opcional)
+VECTORRANGO = os.getenv("VECTORRANGO", "0").strip()  # "1" = solo si anio en rango; "0" = vectoriza todo
+VECTORANIO_MIN = int(os.getenv("VECTORANIO_MIN", "1980"))
+VECTORANIO_MAX = int(os.getenv("VECTORANIO_MAX", "2026"))
+VECTOR_ANIO_DESCONOCIDO = os.getenv("VECTOR_ANIO_DESCONOCIDO", "0").strip()
+
+# Timeout de request SCJN (sube esto si ves muchos Read timeout)
+SCJN_TIMEOUT = int(os.getenv("SCJN_TIMEOUT", "20"))
 
 # =========================
 # Mongo globals
 # =========================
-client_mongo = None
+clientmongo = None
 db = None
-acervo_historico = None
-cola_tesis = None
+acervohistorico = None
+colatesis = None
 meta = None
-sources_tfja = None
-cola_tfja = None
+sourcestfja = None
+colatfja = None
 
 
-# =========================
-# Helpers
-# =========================
-def conectar_mongo():
+def conectarmongo():
     while True:
         try:
-            client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            client = MongoClient(MONGOURI, serverSelectionTimeoutMS=5000)
             client.server_info()
             print("Conectado a MongoDB")
             return client
@@ -87,16 +96,13 @@ def conectar_mongo():
             time.sleep(5)
 
 
-def obtener_vector(texto: str):
+def obtenervector(texto: str):
     texto = (texto or "").strip()
     if not texto:
         return None
     for _ in range(3):
         try:
-            resp = client_ai.embeddings.create(
-                input=texto[:8000],
-                model=EMBED_MODEL,
-            )
+            resp = clientai.embeddings.create(input=texto[:8000], model=EMBEDMODEL)
             return resp.data[0].embedding
         except Exception as e:
             print(f"Error al vectorizar, reintentando: {e}")
@@ -104,77 +110,62 @@ def obtener_vector(texto: str):
     return None
 
 
-def _leer_creado_en(doc):
-    """
-    Lee el campo de fecha de creacion con compatibilidad:
-    primero intenta 'creadoen' (seeder original),
-    luego 'creado_en' (versiones nuevas),
-    si ninguno existe devuelve utcnow().
-    """
-    return (
-        doc.get("creadoen")
-        or doc.get("creado_en")
-        or datetime.utcnow()
-    )
+def _leer_creado_en(doc: dict) -> datetime:
+    if not doc:
+        return datetime.utcnow()
+    ce = doc.get("creado_en") or doc.get("creadoen")
+    if isinstance(ce, datetime):
+        return ce
+    return datetime.utcnow()
 
 
-def tomar_siguiente(cola):
-    """
-    Toma el siguiente documento disponible:
-    - estado "pendiente", O
-    - estado "diferido" cuyo next_run_at ya llego
-    """
+def tomarsiguientecola(cola):
     ahora = datetime.utcnow()
+    filtro = {
+        "$or": [
+            {"estado": "pendiente"},
+            {"estado": "diferido", "next_run_at": {"$lte": ahora}},
+        ]
+    }
+    update = {
+        "$set": {"estado": "procesando", "tomadoen": ahora},
+        "$inc": {"intentos": 1},
+    }
     return cola.find_one_and_update(
-        {
-            "$or": [
-                {"estado": "pendiente"},
-                {"estado": "diferido", "next_run_at": {"$lte": ahora}},
-            ]
-        },
-        {
-            "$set": {"estado": "procesando", "tomado_en": ahora},
-            "$inc": {"intentos": 1},
-        },
+        filtro,
+        update,
+        sort=[("next_run_at", 1), ("creadoen", 1)],
         return_document=ReturnDocument.AFTER,
     )
 
 
-def marcar_completado(cola, filtro: dict):
-    cola.update_one(
-        filtro,
-        {"$set": {"estado": "completado", "completado_en": datetime.utcnow()}},
-    )
+def marcarcompletado(cola, filtro: dict):
+    cola.update_one(filtro, {"$set": {"estado": "completado", "completadoen": datetime.utcnow()}})
 
 
-def marcar_error(cola, filtro: dict, mensaje: str):
-    """Error definitivo no relacionado con disponibilidad de la SCJN."""
+def marcarerror(cola, filtro: dict, mensaje: str):
+    ahora = datetime.utcnow()
+    msg = str(mensaje)[:800]
     cola.update_one(
         filtro,
-        {
-            "$set": {
-                "estado": "error",
-                "error_en": datetime.utcnow(),
-                "mensaje_error": str(mensaje)[:800],
-            }
-        },
+        {"$set": {"estado": "error", "erroren": ahora, "mensajeerror": msg, "error_en": ahora, "mensaje_error": msg}},
     )
 
 
 def marcar_diferido_o_no_disponible(cola, filtro: dict, mensaje: str):
     """
-    Para errores temporales de la SCJN (500/502/503/504):
-    - Lee creado_en / creadoen para compatibilidad con el seeder original
-    - Menos de NO_DISPONIBLE_DIAS dias -> estado "diferido", next_run_at = ahora + DIFERIDO_MINUTOS
-    - NO_DISPONIBLE_DIAS dias o mas    -> estado "no_disponible"
-    En ambos casos guarda el texto del error en mensaje_error (campo unificado).
+    Para errores temporales de la SCJN (500/502/503/504 y timeouts):
+    - Lee creado_en / creadoen para compatibilidad
+    - < NO_DISPONIBLE_DIAS -> estado "diferido", next_run_at = ahora + DIFERIDO_MINUTOS
+    - >= NO_DISPONIBLE_DIAS -> estado "no_disponible"
+    Guarda error en mensajeerror y también en mensaje_error (compat).
     """
     ahora = datetime.utcnow()
+    msg = str(mensaje)[:800]
 
-    # FIX 1: compatibilidad creadoen / creado_en
     doc = cola.find_one(filtro, {"creadoen": 1, "creado_en": 1})
     creado_en = _leer_creado_en(doc) if doc else ahora
-    dias_transcurridos = (ahora - creado_en).total_seconds() / 86400
+    dias_transcurridos = (ahora - creado_en).total_seconds() / 86400.0
 
     if dias_transcurridos >= NO_DISPONIBLE_DIAS:
         cola.update_one(
@@ -182,9 +173,11 @@ def marcar_diferido_o_no_disponible(cola, filtro: dict, mensaje: str):
             {
                 "$set": {
                     "estado": "no_disponible",
-                    "error_en": ahora,
-                    "mensaje_error": str(mensaje)[:800],
                     "no_disponible_en": ahora,
+                    "erroren": ahora,
+                    "mensajeerror": msg,
+                    "error_en": ahora,
+                    "mensaje_error": msg,
                 }
             },
         )
@@ -196,45 +189,49 @@ def marcar_diferido_o_no_disponible(cola, filtro: dict, mensaje: str):
             {
                 "$set": {
                     "estado": "diferido",
-                    "error_en": ahora,
-                    "mensaje_error": str(mensaje)[:800],
                     "next_run_at": next_run,
                     "diferido_en": ahora,
+                    "erroren": ahora,
+                    "mensajeerror": msg,
+                    "error_en": ahora,
+                    "mensaje_error": msg,
                 }
             },
         )
 
 
-def liberar_locks_stale(cola):
-    limite = datetime.utcnow() - timedelta(minutes=LOCK_STALE_MIN)
+def liberarlocksstale(cola):
+    limite = datetime.utcnow() - timedelta(minutes=LOCKSTALEMIN)
     res = cola.update_many(
-        {"estado": "procesando", "tomado_en": {"$lt": limite}},
-        {"$set": {"estado": "pendiente", "liberado_en": datetime.utcnow()}},
+        {"estado": "procesando", "tomadoen": {"$lt": limite}},
+        {"$set": {"estado": "pendiente", "liberadoen": datetime.utcnow()}},
     )
     if res.modified_count:
         print(f"Liberados {res.modified_count} locks stale en {cola.name}")
 
 
-def _sleep_backoff(attempt_index: int):
-    base = RETRY_BACKOFF_BASE * (2 ** attempt_index)
-    jitter = random.uniform(0, RETRY_JITTER_MAX)
+def sleepbackoff(attemptindex: int):
+    base = RETRYBACKOFFBASE * (2 ** attemptindex)
+    jitter = random.uniform(0, RETRYJITTERMAX)
     time.sleep(base + jitter)
 
 
-def normalizar_materias(data):
-    materias = data.get("materias")
-    if materias is None:
-        materias = data.get("materia")
-    if materias is None:
-        return []
-    if isinstance(materias, list):
-        return materias
-    if isinstance(materias, str):
-        return [materias]
-    return []
+def extraermateriadata(data: dict):
+    materia = data.get("materias") or data.get("materia")
+    if not materia:
+        return "NA"
+    if isinstance(materia, str):
+        return materia
+    if isinstance(materia, list) and all(isinstance(x, str) for x in materia):
+        return ", ".join(materia)
+    if isinstance(materia, dict):
+        return materia.get("descripcion") or materia.get("clave") or "NA"
+    if isinstance(materia, list) and all(isinstance(x, dict) for x in materia):
+        return ", ".join((x.get("descripcion") or x.get("clave") or "NA") for x in materia)
+    return "NA"
 
 
-def to_int_or_none(x):
+def _to_int_or_none(x):
     try:
         if x is None:
             return None
@@ -243,8 +240,48 @@ def to_int_or_none(x):
         return None
 
 
+def _decidir_vectorizar(anio):
+    if VECTORRANGO != "1":
+        return True
+    if anio is None:
+        return VECTOR_ANIO_DESCONOCIDO == "1"
+    return VECTORANIO_MIN <= anio <= VECTORANIO_MAX
+
+
+def pedirtesisconreintentos(registroid: str):
+    url = f"{URLBASETESIS}{registroid}"
+    lastresp = None
+    lasterr = None
+
+    for i in range(RETRYATTEMPTS):
+        try:
+            resp = http.get(url, timeout=SCJN_TIMEOUT)
+            lastresp = resp
+
+            if resp.status_code == 200:
+                return resp, None, False
+
+            if resp.status_code in RETRYSTATUSCODES:
+                lasterr = f"HTTP {resp.status_code}"
+                if i < RETRYATTEMPTS - 1:
+                    sleepbackoff(i)
+                    continue
+                return resp, f"HTTP {resp.status_code} agotó reintentos", True
+
+            return resp, f"HTTP {resp.status_code} no-retry", False
+
+        except requests.RequestException as e:
+            lasterr = f"RequestException: {e}"
+            if i < RETRYATTEMPTS - 1:
+                sleepbackoff(i)
+                continue
+            return lastresp, f"{lasterr} agotó reintentos", True
+
+    return lastresp, (lasterr or "Fallo desconocido agotó reintentos"), True
+
+
 # =========================
-# TESIS (SCJN)
+# Cola tesis (siembra original)
 # =========================
 BLOQUES = [
     (292564, 350000),
@@ -279,12 +316,12 @@ BLOQUES = [
 ]
 
 
-def inicializar_cola_tesis():
-    if SEED_TESIS_COLA != "1":
-        print("Siembra de cola_tesis desactivada (SEED_TESIS_COLA=0).")
+def inicializarcolatesis():
+    if SEEDCOLATESIS != "1":
+        print("Siembra de cola_tesis desactivada (SEEDCOLATESIS=0).")
         return
 
-    existente = meta.find_one({"tipo": "cola_inicializada"})
+    existente = meta.find_one({"tipo": "colainicializada"})
     if existente:
         print("Cola de tesis ya inicializada.")
         return
@@ -292,13 +329,13 @@ def inicializar_cola_tesis():
     print("Inicializando cola de tesis...")
     bulk = []
     for inicio, fin in BLOQUES:
-        for registro_id in range(inicio, fin):
+        for registroid in range(inicio, fin):
             bulk.append(
                 UpdateOne(
-                    {"registro": str(registro_id)},
+                    {"registro": str(registroid)},
                     {
                         "$setOnInsert": {
-                            "registro": str(registro_id),
+                            "registro": str(registroid),
                             "estado": "pendiente",
                             "intentos": 0,
                             "creadoen": datetime.utcnow(),
@@ -308,311 +345,263 @@ def inicializar_cola_tesis():
                 )
             )
             if len(bulk) >= 1000:
-                cola_tesis.bulk_write(bulk, ordered=False)
+                colatesis.bulk_write(bulk, ordered=False)
                 bulk = []
 
     if bulk:
-        cola_tesis.bulk_write(bulk, ordered=False)
+        colatesis.bulk_write(bulk, ordered=False)
 
-    meta.update_one(
-        {"tipo": "cola_inicializada"},
-        {"$set": {"fecha": datetime.utcnow()}},
-        upsert=True,
-    )
+    meta.update_one({"tipo": "colainicializada"}, {"$set": {"fecha": datetime.utcnow()}}, upsert=True)
     print("Cola de tesis inicializada.")
 
 
-def pedir_tesis_con_reintentos(registro_id: str):
-    url = f"{URL_BASE_TESIS}{registro_id}"
-    last_resp = None
-    last_err = None
-
-    for i in range(RETRY_ATTEMPTS):
-        try:
-            resp = http.get(url, timeout=10)
-            last_resp = resp
-
-            if resp.status_code == 200:
-                return resp, None, False
-
-            if resp.status_code in RETRY_STATUS_CODES:
-                last_err = f"HTTP {resp.status_code}"
-                if i < RETRY_ATTEMPTS - 1:
-                    _sleep_backoff(i)
-                    continue
-                return resp, f"HTTP {resp.status_code} (agoto reintentos)", True
-
-            return resp, f"HTTP {resp.status_code} (no-retry)", False
-
-        except requests.RequestException as e:
-            last_err = f"RequestException: {e}"
-            if i < RETRY_ATTEMPTS - 1:
-                _sleep_backoff(i)
-                continue
-            return last_resp, f"{last_err} (agoto reintentos)", True
-
-    return last_resp, (last_err or "Fallo desconocido (agoto reintentos)"), True
-
-
-def decidir_vectorizar(anio: int | None) -> bool:
-    if VECTOR_SOLO_RANGO != "1":
-        return True
-    if anio is None:
-        return VECTOR_SI_ANIO_DESCONOCIDO == "1"
-    return VECTOR_ANIO_MIN <= anio <= VECTOR_ANIO_MAX
-
-
-def procesar_tesis(doc_cola):
-    registro_id = str(doc_cola.get("registro", "")).strip()
-    if not registro_id:
-        marcar_error(cola_tesis, {"_id": doc_cola["_id"]}, "Falta registro")
+def procesartesisdoc(doccola):
+    registroid = str(doccola.get("registro", "")).strip()
+    if not registroid:
+        marcarerror(colatesis, {"_id": doccola["_id"]}, "Falta registro")
         return True, False
 
-    if acervo_historico.find_one({"registro": registro_id, "procesado": True}):
-        marcar_completado(cola_tesis, {"registro": registro_id})
+    if acervohistorico.find_one({"registro": registroid, "procesado": True}):
+        marcarcompletado(colatesis, {"registro": registroid})
         return True, False
 
-    resp, err, agotado = pedir_tesis_con_reintentos(registro_id)
+    resp, err, agotado = pedirtesisconreintentos(registroid)
 
     if resp is None:
-        # Sin respuesta de red — diferir
-        marcar_diferido_o_no_disponible(
-            cola_tesis, {"registro": registro_id}, err or "Sin respuesta"
-        )
+        # Timeout / conexión: diferir
+        marcar_diferido_o_no_disponible(colatesis, {"registro": registroid}, err or "Sin respuesta")
         return False, True
 
     if resp.status_code != 200:
         if resp.status_code in (404, 410):
-            # No existe definitivamente — completar sin guardar
-            marcar_completado(cola_tesis, {"registro": registro_id})
+            marcarerror(colatesis, {"registro": registroid}, err or f"HTTP {resp.status_code}")
+            marcarcompletado(colatesis, {"registro": registroid})
             return True, False
 
-        if agotado and resp.status_code in RETRY_STATUS_CODES:
-            # FIX 4: 500 no es "no existe", es error temporal — diferir
-            marcar_diferido_o_no_disponible(
-                cola_tesis,
-                {"registro": registro_id},
-                err or f"HTTP {resp.status_code}"
-            )
+        # Para 500/502/503/504/429: si agotó reintentos, difiere; si no, ya viene manejado por pedirtesisconreintentos
+        if agotado and resp.status_code in RETRYSTATUSCODES:
+            marcar_diferido_o_no_disponible(colatesis, {"registro": registroid}, err or f"HTTP {resp.status_code}")
             return False, True
 
-        # Otro codigo no recuperable — completar
-        marcar_completado(cola_tesis, {"registro": registro_id})
+        marcarerror(colatesis, {"registro": registroid}, err or f"HTTP {resp.status_code}")
         return True, False
 
     try:
         data = resp.json()
     except Exception as e:
-        marcar_error(cola_tesis, {"registro": registro_id}, f"JSON invalido: {e}")
+        marcarerror(colatesis, {"registro": registroid}, f"JSON inválido: {e}")
         return False, False
 
     rubro = (data.get("rubro") or "").strip()
     texto = (data.get("texto") or "").strip()
     if not rubro or not texto:
-        # Registro vacio — completar sin guardar
-        marcar_completado(cola_tesis, {"registro": registro_id})
+        marcarerror(colatesis, {"registro": registroid}, "Sin rubro o texto")
+        marcarcompletado(colatesis, {"registro": registroid})
         return True, False
 
-    anio = to_int_or_none(data.get("anio"))
+    anio = _to_int_or_none(data.get("anio"))
     mes = (data.get("mes") or "").strip() or None
-    tipo_tesis = (data.get("tipoTesis") or "").strip() or None
-    nota_publica = (data.get("notaPublica") or "").strip() or None
+    tipotesis = (data.get("tipoTesis") or "").strip() or None
+    notapublica = (data.get("notaPublica") or "").strip() or None
     localizacion = (data.get("localizacion") or "").strip() or None
 
-    vectorizar = decidir_vectorizar(anio)
     vector = None
-    if vectorizar:
-        prompt = (
-            "SCJN/SJF\n"
-            f"Registro: {registro_id}\n"
-            f"Anio: {anio}\n"
-            f"Mes: {mes}\n"
-            f"Tipo: {tipo_tesis}\n"
-            f"Epoca: {data.get('epoca', 'N/A')}\n"
-            f"Instancia: {data.get('instancia', 'N/A')}\n"
-            f"Materias: {', '.join(normalizar_materias(data))}\n"
-            f"Rubro: {rubro}\n\n"
-            f"{texto}"
+    if _decidir_vectorizar(anio):
+        prompt = "\n".join(
+            [
+                "SCJN/SJF",
+                f"Registro: {registroid}",
+                f"Año: {anio}",
+                f"Mes: {mes}",
+                f"TipoTesis: {tipotesis}",
+                f"Época: {data.get('epoca', 'N/A')}",
+                f"Instancia: {data.get('instancia', 'N/A')}",
+                f"Materias: {extraermateriadata(data)}",
+                f"Rubro: {rubro}",
+                "",
+                texto,
+            ]
         )
-        vector = obtener_vector(prompt)
+        vector = obtenervector(prompt)
         if not vector:
-            marcar_error(cola_tesis, {"registro": registro_id}, "Error al vectorizar")
+            marcarerror(colatesis, {"registro": registroid}, "Error al vectorizar")
             return False, False
 
     out = {
-        "registro": registro_id,
-        "id_tesis": data.get("idTesis", None),
+        "registro": registroid,
+        "idTesis": data.get("idTesis"),
         "rubro": rubro,
         "texto": texto,
         "epoca": data.get("epoca", "N/A"),
         "instancia": data.get("instancia", "N/A"),
-        "organo_juris": data.get("organoJuris") or None,
+        "organoJuris": data.get("organoJuris"),
         "fuente": data.get("fuente", "Repositorio Bicentenario"),
-        "tesis_clave": data.get("tesis") or None,
-        "tipo_tesis": tipo_tesis,
+        "tesis": data.get("tesis"),
+        "tipoTesis": tipotesis,
         "anio": anio,
         "mes": mes,
-        "nota_publica": nota_publica,
+        "notaPublica": notapublica,
         "localizacion": localizacion,
-        "precedentes": data.get("precedentes") or None,
-        "huella_digital": data.get("huellaDigital") or None,
-        "materias": normalizar_materias(data),
-        "vector_busqueda": vector,
-        "vectorizado": bool(vector),
+        "precedentes": data.get("precedentes"),
+        "huellaDigital": data.get("huellaDigital"),
+        "materia": extraermateriadata(data),
+        "vectorbusqueda": vector,
+        "vectorbusqueda_ok": bool(vector),
         "procesado": True,
-        "actualizado_en": datetime.utcnow(),
+        "actualizadoen": datetime.utcnow(),
     }
 
-    acervo_historico.update_one({"registro": registro_id}, {"$set": out}, upsert=True)
-    marcar_completado(cola_tesis, {"registro": registro_id})
+    acervohistorico.update_one({"registro": registroid}, {"$set": out}, upsert=True)
+    marcarcompletado(colatesis, {"registro": registroid})
     return True, False
 
 
 # =========================
-# TFJA
+# TFJA (sin cambios mayores)
 # =========================
-def procesar_tfja(doc_cola):
-    doc_id = doc_cola.get("doc_id")
-    if not doc_id:
-        marcar_error(cola_tfja, {"_id": doc_cola["_id"]}, "Falta doc_id")
+def procesartfjadoc(doccola):
+    docid = doccola.get("docid")
+    if not docid:
+        marcarerror(colatfja, {"_id": doccola["_id"]}, "Falta docid")
         return True
 
-    if sources_tfja.find_one({"doc_id": doc_id, "procesado": True}):
-        marcar_completado(cola_tfja, {"doc_id": doc_id})
+    if sourcestfja.find_one({"docid": docid, "procesado": True}):
+        marcarcompletado(colatfja, {"docid": docid})
         return True
 
-    rubro = (doc_cola.get("rubro") or "").strip()
-    texto = (doc_cola.get("texto") or "").strip()
-
+    rubro = (doccola.get("rubro") or "").strip()
+    texto = (doccola.get("texto") or "").strip()
     if not texto:
-        marcar_error(cola_tfja, {"doc_id": doc_id}, "Sin texto")
-        marcar_completado(cola_tfja, {"doc_id": doc_id})
+        marcarerror(colatfja, {"docid": docid}, "Sin texto")
+        marcarcompletado(colatfja, {"docid": docid})
         return True
 
-    epoca = doc_cola.get("epoca", "N/A")
-    anio = doc_cola.get("anio", "N/A")
-    mes = doc_cola.get("mes", "N/A")
+    epoca = doccola.get("epoca", "N/A")
+    anio = doccola.get("anio", "N/A")
+    mes = doccola.get("mes", "N/A")
 
-    prompt = (
-        "TFJA\n"
-        f"Epoca: {epoca}\n"
-        f"Anio: {anio}\n"
-        f"Mes: {mes}\n"
-        f"Rubro: {rubro}\n\n"
-        f"{texto}"
+    prompt = "\n".join(
+        [
+            "TFJA",
+            f"Época: {epoca}",
+            f"Año: {anio}",
+            f"Mes: {mes}",
+            f"Rubro: {rubro}",
+            "",
+            texto,
+        ]
     )
-    vector = obtener_vector(prompt)
+    vector = obtenervector(prompt)
     if not vector:
-        marcar_error(cola_tfja, {"doc_id": doc_id}, "Error al vectorizar")
+        marcarerror(colatfja, {"docid": docid}, "Error al vectorizar")
         return False
 
     out = {
-        "doc_id": doc_id,
-        "tipo": doc_cola.get("tipo", "TFJA"),
+        "docid": docid,
+        "tipo": doccola.get("tipo", "TFJA"),
         "epoca": epoca,
         "anio": anio,
         "mes": mes,
         "rubro": rubro,
         "texto": texto,
-        "source_file": doc_cola.get("source_file"),
-        "source_path": doc_cola.get("source_path"),
-        "vector_busqueda": vector,
+        "sourcefile": doccola.get("sourcefile"),
+        "sourcepath": doccola.get("sourcepath"),
+        "vectorbusqueda": vector,
         "procesado": True,
-        "actualizado_en": datetime.utcnow(),
+        "actualizadoen": datetime.utcnow(),
     }
 
-    sources_tfja.update_one({"doc_id": doc_id}, {"$set": out}, upsert=True)
-    marcar_completado(cola_tfja, {"doc_id": doc_id})
+    sourcestfja.update_one({"docid": docid}, {"$set": out}, upsert=True)
+    marcarcompletado(colatfja, {"docid": docid})
     return True
 
 
-# =========================
-# Main loop
-# =========================
-def worker_loop():
-    global client_mongo, db
-    global acervo_historico, cola_tesis, meta
-    global sources_tfja, cola_tfja
+def workerloop():
+    global clientmongo, db
+    global acervohistorico, colatesis, meta
+    global sourcestfja, colatfja
 
-    client_mongo = conectar_mongo()
-    db = client_mongo[DB_NAME]
+    clientmongo = conectarmongo()
+    db = clientmongo[DBNAME]
 
-    acervo_historico = db["acervo_historico"]
-    cola_tesis = db["cola_tesis"]
+    acervohistorico = db["acervo_historico"]
+    colatesis = db["cola_tesis"]
     meta = db["meta"]
-    sources_tfja = db["sources_tfja"]
-    cola_tfja = db["cola_tfja"]
 
-    # Indices opcionales
-    try:
-        acervo_historico.create_index("registro", unique=True)
-    except Exception:
-        pass
-    try:
-        sources_tfja.create_index("doc_id", unique=True)
-    except Exception:
-        pass
-    try:
-        cola_tfja.create_index("doc_id", unique=True)
-    except Exception:
-        pass
-    # Indice para buscar diferidos eficientemente
-    try:
-        cola_tesis.create_index([("estado", 1), ("next_run_at", 1)])
-    except Exception:
-        pass
+    sourcestfja = db["sources_tfja"]
+    colatfja = db["cola_tfja"]
 
-    inicializar_cola_tesis()
+    # Índices
+    try:
+        acervohistorico.create_index("registro", unique=True)
+    except Exception as e:
+        print(f"Índice ya existe o se omite: {e}")
+
+    try:
+        sourcestfja.create_index("docid", unique=True)
+    except Exception as e:
+        print(f"Índice ya existe o se omite: {e}")
+
+    try:
+        colatfja.create_index("docid", unique=True)
+    except Exception as e:
+        print(f"Índice ya existe o se omite: {e}")
+
+    # Para el diferido
+    try:
+        colatesis.create_index([("estado", 1), ("next_run_at", 1)])
+    except Exception as e:
+        print(f"Índice ya existe o se omite: {e}")
+
+    inicializarcolatesis()
 
     tiempos = deque(maxlen=20)
-    errores_scjn_consecutivos = 0
+    erroresscjnconsecutivos = 0
     i = 0
 
     while True:
         if i % 200 == 0:
-            liberar_locks_stale(cola_tesis)
-            liberar_locks_stale(cola_tfja)
+            liberarlocksstale(colatesis)
+            liberarlocksstale(colatfja)
 
         tipo = SCHEDULE[i % len(SCHEDULE)]
         i += 1
-
-        procesado_algo = False
+        procesadoalgo = False
 
         if tipo == "tesis":
-            doc = tomar_siguiente(cola_tesis)
+            doc = tomarsiguientecola(colatesis)
             if doc:
-                procesado_algo = True
-                ok, scjn_error_real = procesar_tesis(doc)
+                procesadoalgo = True
+                ok, scjnerrorreal = procesartesisdoc(doc)
 
-                if scjn_error_real and not ok:
-                    errores_scjn_consecutivos += 1
+                if scjnerrorreal and not ok:
+                    erroresscjnconsecutivos += 1
                 elif ok:
-                    errores_scjn_consecutivos = 0
+                    erroresscjnconsecutivos = 0
 
-                if errores_scjn_consecutivos >= MAX_ERRORES_SCJN:
+                if erroresscjnconsecutivos >= MAXERRORESSCJN:
                     print(
-                        f"SCJN inestable ({errores_scjn_consecutivos} errores seguidos). "
-                        f"Pausando {ESPERA_PAUSA_SCJN // 60} minutos..."
+                        f"SCJN inestable ({erroresscjnconsecutivos} errores seguidos). "
+                        f"Pausando {ESPERAPAUSASCJN // 60} minutos..."
                     )
-                    time.sleep(ESPERA_PAUSA_SCJN)
-                    print("Retomando procesamiento despues de la pausa.")
-                    errores_scjn_consecutivos = 0
-
+                    time.sleep(ESPERAPAUSASCJN)
+                    print("Retomando procesamiento después de la pausa.")
+                    erroresscjnconsecutivos = 0
         else:
-            doc = tomar_siguiente(cola_tfja)
+            doc = tomarsiguientecola(colatfja)
             if doc:
-                procesado_algo = True
-                _ = procesar_tfja(doc)
+                procesadoalgo = True
+                procesartfjadoc(doc)
 
-        if procesado_algo:
+        if procesadoalgo:
             tiempos.append(time.time())
             if len(tiempos) >= 10 and (tiempos[-1] - tiempos[0]) > 0:
                 tps = len(tiempos) / (tiempos[-1] - tiempos[0])
                 print(f"Velocidad (ventana): {tps:.2f} items/seg")
-            time.sleep(ESPERA_NORMAL)
+            time.sleep(ESPERANORMAL)
         else:
             time.sleep(1)
 
 
 if __name__ == "__main__":
-    worker_loop()
+    workerloop()
