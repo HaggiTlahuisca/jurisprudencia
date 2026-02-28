@@ -6,7 +6,7 @@ from collections import deque
 
 import requests
 from dotenv import load_dotenv
-from pymongo.mongoclient import MongoClient
+from pymongo import MongoClient 
 from pymongo import UpdateOne, ReturnDocument
 from openai import OpenAI
 
