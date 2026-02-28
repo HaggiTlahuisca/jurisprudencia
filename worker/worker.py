@@ -1,4 +1,3 @@
-
 import os
 import time
 from datetime import datetime
@@ -127,7 +126,6 @@ def inicializar_cola():
 
     for inicio, fin in BLOQUES:
         for registro_id in range(inicio, fin):
-
             bulk.append(
                 UpdateOne(
                     {"registro": str(registro_id)},
@@ -187,19 +185,23 @@ def marcar_error(registro: str, mensaje: str):
     )
 
 # ============================
-# WORKER PRINCIPAL (CON ESPERA INTELIGENTE)
+# WORKER PRINCIPAL
 # ============================
 
-MAX_ERRORES = 5
-ESPERA_BASE = 3
-errores_consecutivos = 0
+MAX_ERRORES = 5           # errores consecutivos antes de pausar
+ESPERA_NORMAL = 0.4       # segundos entre registros sin errores
+ESPERA_PAUSA = 20 * 60    # 20 minutos cuando la SCJN está inestable
 
-def procesar_registro(doc_cola):
+def procesar_registro(doc_cola) -> bool:
+    """
+    Retorna True si el registro se procesó correctamente (o ya estaba procesado).
+    Retorna False si hubo un error HTTP o de vectorización.
+    """
     registro_id = doc_cola["registro"]
 
     if coleccion.find_one({"registro": registro_id, "procesado": True}):
         marcar_completado(registro_id)
-        return
+        return True
 
     try:
         url = f"{URL_BASE}{registro_id}"
@@ -208,7 +210,7 @@ def procesar_registro(doc_cola):
         if resp.status_code != 200:
             marcar_error(registro_id, f"HTTP {resp.status_code}")
             print(f"⚠️ {registro_id}: HTTP {resp.status_code}")
-            return
+            return False  # ← error real, cuenta para el backoff
 
         data = resp.json()
         rubro = data.get("rubro", "")
@@ -217,13 +219,13 @@ def procesar_registro(doc_cola):
         if not rubro or not texto:
             marcar_error(registro_id, "Sin rubro o texto")
             print(f"⚠️ {registro_id}: sin rubro o texto")
-            return
+            return True  # ← registro vacío, no es culpa de la SCJN
 
         print(f"🔄 Procesando {registro_id}...")
         vector = obtener_vector(f"{rubro} {texto}")
         if not vector:
             marcar_error(registro_id, "Error al vectorizar")
-            return
+            return False  # ← error de OpenAI, cuenta para el backoff
 
         documento = {
             "registro": registro_id,
@@ -241,13 +243,16 @@ def procesar_registro(doc_cola):
             {"registro": registro_id}, {"$set": documento}, upsert=True
         )
         marcar_completado(registro_id)
+        return True  # ← éxito
 
     except Exception as e:
         print(f"⚠️ Error en {registro_id}: {e}")
         marcar_error(registro_id, str(e))
+        return False  # ← excepción inesperada, cuenta para el backoff
+
 
 def worker_loop():
-    global client_mongo, db, coleccion, cola, meta, errores_consecutivos
+    global client_mongo, db, coleccion, cola, meta
 
     client_mongo = conectar_mongo()
     db = client_mongo["tepantlatia_db"]
@@ -258,6 +263,7 @@ def worker_loop():
     inicializar_cola()
 
     tiempos = deque(maxlen=20)
+    errores_consecutivos = 0
 
     while True:
         doc = tomar_siguiente_de_cola()
@@ -266,25 +272,29 @@ def worker_loop():
             time.sleep(10)
             continue
 
-        try:
-            procesar_registro(doc)
+        exito = procesar_registro(doc)
+
+        if exito:
             errores_consecutivos = 0
-        except:
+        else:
             errores_consecutivos += 1
 
         tiempos.append(time.time())
 
-        if len(tiempos) >= 5:
+        if len(tiempos) >= 10:
             tps = len(tiempos) / (tiempos[-1] - tiempos[0])
             print(f"⚡ Velocidad: {tps:.2f} tesis/segundo")
 
         if errores_consecutivos >= MAX_ERRORES:
-            espera = ESPERA_BASE * errores_consecutivos
-            print(f"⏳ SCJN inestable, esperando {espera} segundos...")
-            time.sleep(espera)
+            print(f"⏳ SCJN inestable ({errores_consecutivos} errores seguidos). "
+                  f"Pausando 20 minutos...")
+            time.sleep(ESPERA_PAUSA)
+            print("▶️ Retomando procesamiento después de la pausa.")
             errores_consecutivos = 0
+            continue  # salta el time.sleep normal para reanudar de inmediato
 
-        time.sleep(0.4)
+        time.sleep(ESPERA_NORMAL)
+
 
 if __name__ == "__main__":
     worker_loop()
