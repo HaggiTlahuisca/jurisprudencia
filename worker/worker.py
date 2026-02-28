@@ -1,4 +1,4 @@
-import os
+Oimport os
 import time
 import random
 from datetime import datetime, timedelta
@@ -46,7 +46,7 @@ RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "1.0"))
 RETRY_JITTER_MAX = float(os.getenv("RETRY_JITTER_MAX", "0.6"))
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
-MAX_ERRORES_SCJN = int(os.getenv("MAX_ERRORES_SCJN", "20"))
+MAX_ERRORES_SCJN = int(os.getenv("MAX_ERRORES_SCJN", "40"))
 ESPERA_PAUSA_SCJN = int(os.getenv("ESPERA_PAUSA_SCJN", str(5 * 60)))
 
 ESPERA_NORMAL = float(os.getenv("ESPERA_NORMAL", "0.35"))
