@@ -8,7 +8,7 @@ primary_region = "lax"
   PYTHONUNBUFFERED = "1"
 
 [processes]
-  app = "uvicorn api:app --host 0.0.0.0 --port 8080"
+  app = "uvicorn api.api:app --host 0.0.0.0 --port 8080"
 
 [http_service]
   internal_port = 8080
