@@ -1,0 +1,14 @@
+app = "acervo-worker"
+primary_region = "lax"
+
+[build]
+  dockerfile = "../Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+[processes]
+  worker = "python worker/worker.py"
+
+[deploy]
+  strategy = "immediate"
