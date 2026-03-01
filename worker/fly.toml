@@ -22,3 +22,10 @@ primary_region = "lax"
   cpus = 8
   memory_mb = 16384
   processes = ["worker"]
+
+[http_service]
+  internal_port = 8080
+  force_https = false
+  auto_stop_machines = false
+  auto_start_machines = true
+  processes = ["worker"]
