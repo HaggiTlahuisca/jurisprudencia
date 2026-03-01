@@ -20,5 +20,5 @@ primary_region = "lax"
 [[vm]]
   cpu_kind = "shared"
   cpus = 8
-  memory_mb = 8192
+  memory_mb = 16384
   processes = ["worker"]
