@@ -22,6 +22,7 @@ primary_region = "lax"
   processes = ["worker"]
 
 [[vm]]
-  size = "performance-cpu-8x"
-  memory = "6gb"
-  processes = ["worker"]
+  memory = '16gb'
+  cpu_kind = 'shared'
+  cpus = 8
+  memory_mb = 16384
