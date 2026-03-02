@@ -1,5 +1,4 @@
 import os
-import sys
 import time
 import random
 import json
@@ -14,35 +13,24 @@ from pymongo import MongoClient
 from pymongo import UpdateOne, ReturnDocument
 from openai import OpenAI
 
-# Logs no buffered
-sys.stdout.reconfigure(line_buffering=True)
-
 load_dotenv()
 
-print("=== DEBUG: worker.py iniciado ===")
-
+# =========================
+# Config base
+# =========================
 MONGOURI = os.getenv("MONGO_URI")
 DBNAME = os.getenv("MONGODB_DB", "tepantlatia_db")
 OPENAIAPIKEY = os.getenv("OPENAI_API_KEY")
 EMBEDMODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 URLBASETESIS = os.getenv("URL_BASE_TESIS", "https://bicentenario.scjn.gob.mx/repositorio-scjn/api/v1/tesis/")
 
-print(f"=== DEBUG: MONGO_URI len={len(MONGOURI) if MONGOURI else 0}")
-print(f"=== DEBUG: OPENAI_KEY len={len(OPENAIAPIKEY) if OPENAIAPIKEY else 0}")
-
 if not MONGOURI:
-    print("ERROR: Falta MONGO_URI")
-    sys.exit(1)
+    raise RuntimeError("Falta MONGO_URI.")
 if not OPENAIAPIKEY:
-    print("ERROR: Falta OPENAI_API_KEY")
-    sys.exit(1)
-
-print("=== DEBUG: Variables OK ===")
+    raise RuntimeError("Falta OPENAI_API_KEY.")
 
 clientai = OpenAI(api_key=OPENAIAPIKEY)
 http = requests.Session()
-
-print("=== DEBUG: OpenAI y requests OK ===")
 
 # =========================
 # Retries/backoff SCJN
@@ -55,7 +43,7 @@ MAXERRORESSCJN = int(os.getenv("MAX_ERRORES_SCJN", "40"))
 ESPERAPAUSASCJN = int(os.getenv("ESPERA_PAUSA_SCJN", str(5 * 60)))
 
 # Loop (Le damos un respiro un poco mayor por defecto para salvar el CPU de Mongo)
-ESPERANORMAL = float(os.getenv("ESPERA_NORMAL", "0.1"))
+ESPERANORMAL = float(os.getenv("ESPERA_NORMAL", "0.60"))
 LOCKSTALEMIN = int(os.getenv("LOCK_STALE_MIN", "30"))
 
 # Round-robin: 6 tesis por 1 TFJA
@@ -446,4 +434,74 @@ def workerloop():
     colatfja = db["cola_tfja"]
 
     # CORRECCIÓN DE ÍNDICES: 
-    # Añadimos los índices exactos para que Mongo no tenga que es
+    # Añadimos los índices exactos para que Mongo no tenga que escanear toda la colección
+    # al buscar el estado "pendiente" ordenado por "creadoen". Esto bajará el CPU a la normalidad.
+    for nombre, fn in [
+        ("registro en acervo_historico", lambda: acervohistorico.create_index("registro", unique=True)),
+        ("docid en sources_tfja", lambda: sourcestfja.create_index("docid", unique=True)),
+        ("docid en cola_tfja", lambda: colatfja.create_index("docid")),
+        ("estado+creadoen en cola_tesis", lambda: colatesis.create_index([("estado", 1), ("creadoen", 1)])),
+        ("estado+next_run_at en cola_tesis", lambda: colatesis.create_index([("estado", 1), ("next_run_at", 1)])),
+        ("estado+tomadoen en cola_tesis", lambda: colatesis.create_index([("estado", 1), ("tomadoen", 1)])),
+        ("estado+creadoen en cola_tfja", lambda: colatfja.create_index([("estado", 1), ("creadoen", 1)])),
+        ("estado+next_run_at en cola_tfja", lambda: colatfja.create_index([("estado", 1), ("next_run_at", 1)])),
+        ("estado+tomadoen en cola_tfja", lambda: colatfja.create_index([("estado", 1), ("tomadoen", 1)])),
+    ]:
+        try:
+            fn()
+        except Exception as e:
+            print(f"Indice '{nombre}' ya existe o se omite: {e}")
+
+    backfill_cola_campos(colatesis)
+    backfill_cola_campos(colatfja)
+    
+    tiempos = deque(maxlen=20)
+    erroresscjnconsecutivos = 0
+    scjn_pause_until = 0.0
+    i = 0
+
+    while True:
+        if i % 200 == 0:
+            liberarlocksstale(colatesis)
+            liberarlocksstale(colatfja)
+
+        tipo = SCHEDULE[i % len(SCHEDULE)]
+        i += 1
+        procesadoalgo = False
+
+        if time.time() < scjn_pause_until and tipo == "tesis" and WTFJA > 0:
+            tipo = "tfja"
+
+        if tipo == "tesis":
+            doc = tomarsiguientecola(colatesis)
+            if doc:
+                procesadoalgo = True
+                ok, scjnerrorreal = procesartesisdoc(doc)
+                if scjnerrorreal and not ok:
+                    erroresscjnconsecutivos += 1
+                elif ok:
+                    erroresscjnconsecutivos = 0
+                if erroresscjnconsecutivos >= MAXERRORESSCJN:
+                    scjn_pause_until = time.time() + ESPERAPAUSASCJN
+                    print(f"SCJN inestable ({erroresscjnconsecutivos} errores seguidos). "
+                          f"Pausando tesis {ESPERAPAUSASCJN // 60} min (TFJA sigue).")
+                    log_event("scjn_pause", errores=erroresscjnconsecutivos, pausa_seg=ESPERAPAUSASCJN)
+                    erroresscjnconsecutivos = 0
+        else:
+            doc = tomarsiguientecola(colatfja)
+            if doc:
+                procesadoalgo = True
+                procesartfjadoc(doc)
+
+        if procesadoalgo:
+            tiempos.append(time.time())
+            if len(tiempos) >= 10 and (tiempos[-1] - tiempos[0]) > 0:
+                tps = len(tiempos) / (tiempos[-1] - tiempos[0])
+                print(f"Velocidad (ventana): {tps:.2f} items/seg")
+            time.sleep(ESPERANORMAL)
+        else:
+            time.sleep(1)
+
+if __name__ == "__main__":
+    iniciar_servidor_health()
+    workerloop()
