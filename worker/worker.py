@@ -437,6 +437,8 @@ def workerloop():
     # Añadimos los índices exactos para que Mongo no tenga que escanear toda la colección
     # al buscar el estado "pendiente" ordenado por "creadoen". Esto bajará el CPU a la normalidad.
     for nombre, fn in [
+        ("registro único en cola_tesis", lambda: colatesis.create_index("registro", unique=True)),
+        ("docid en sources_tfja", lambda: sourcestfja.create_index("docid", unique=True)),
         ("registro en acervo_historico", lambda: acervohistorico.create_index("registro", unique=True)),
         ("docid en sources_tfja", lambda: sourcestfja.create_index("docid", unique=True)),
         ("docid en cola_tfja", lambda: colatfja.create_index("docid")),
@@ -446,7 +448,6 @@ def workerloop():
         ("estado+creadoen en cola_tfja", lambda: colatfja.create_index([("estado", 1), ("creadoen", 1)])),
         ("estado+next_run_at en cola_tfja", lambda: colatfja.create_index([("estado", 1), ("next_run_at", 1)])),
         ("estado+tomadoen en cola_tfja", lambda: colatfja.create_index([("estado", 1), ("tomadoen", 1)])),
-        ("registro único en cola_tesis", lambda: colatesis.create_index("registro", unique=True)),
     ]:
         try:
             fn()
