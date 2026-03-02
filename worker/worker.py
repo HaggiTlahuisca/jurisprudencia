@@ -59,7 +59,6 @@ NO_DISPONIBLE_DIAS = int(os.getenv("NO_DISPONIBLE_DIAS", "3"))
 MAX_INTENTOS_NO_DISPONIBLE = int(os.getenv("MAX_INTENTOS_NO_DISPONIBLE", "200"))
 MIN_INTENTOS_PARA_NO_DISPONIBLE = int(os.getenv("MIN_INTENTOS_PARA_NO_DISPONIBLE", "5"))
 INDEXAR_SIN_VECTOR = os.getenv("INDEXAR_SIN_VECTOR", "0").strip()
-SEEDCOLATESIS = os.getenv("SEED_TESIS_COLA", "0").strip()
 VECTORRANGO = os.getenv("VECTOR_SOLO_RANGO", "0").strip()
 VECTORANIO_MIN = int(os.getenv("VECTOR_ANIO_MIN", "1980"))
 VECTORANIO_MAX = int(os.getenv("VECTOR_ANIO_MAX", "2026"))
@@ -155,9 +154,8 @@ def tomarsiguientecola(cola):
         "$set": {"estado": "procesando", "tomadoen": ahora},
         "$inc": {"intentos": 1},
     }
+    # Solo buscamos pendientes o diferidos que ya toca procesar, sin rangos específicos
     for filtro, sort in [
-        ({"estado": "pendiente", "registro": {"$gte": "600000", "$lte": "999999"}}, [("registro", _ORDEN)]),
-        ({"estado": "pendiente", "registro": {"$gte": "1000000"}}, [("registro", _ORDEN)]),
         ({"estado": "pendiente"}, [("creadoen", _ORDEN)]),
         ({"estado": "diferido", "next_run_at": {"$lte": ahora}}, [("next_run_at", 1)]),
     ]:
@@ -296,46 +294,8 @@ def pedirtesisconreintentos(registroid: str):
     return lastresp, (lasterr or "Fallo desconocido agoto reintentos"), True
 
 # =========================
-# Cola tesis (siembra)
+# Procesamiento Tesis
 # =========================
-BLOQUES = [
-    (292564, 350000), (350000, 400000), (400000, 450000), (450000, 500000),
-    (500000, 550000), (550000, 600000), (600000, 650000), (650000, 700000),
-    (700000, 750000), (750000, 800000), (800000, 850000), (850000, 900000),
-    (900000, 950000), (950000, 1000000), (1000000, 1050000), (1050000, 1100000),
-    (1100000, 1150000), (1150000, 1200000), (1200000, 1250000), (1250000, 1300000),
-    (1300000, 1350000), (1350000, 1400000), (1400000, 1450000), (1450000, 1500000),
-    (1500000, 1550000), (1550000, 1600000), (161000, 206000), (207000, 2023000),
-    (2028000, 2031780),
-]
-
-def inicializarcolatesis():
-    if SEEDCOLATESIS != "1":
-        print("Siembra de cola_tesis desactivada (SEEDCOLATESIS=0).")
-        return
-    existente = meta.find_one({"tipo": "colainicializada"})
-    if existente:
-        print("Cola de tesis ya inicializada.")
-        return
-    print("Inicializando cola de tesis...")
-    bulk = []
-    ahora = datetime.utcnow()
-    for inicio, fin in BLOQUES:
-        for registroid in range(inicio, fin):
-            bulk.append(UpdateOne(
-                {"registro": str(registroid)},
-                {"$setOnInsert": {"registro": str(registroid), "estado": "pendiente",
-                                   "intentos": 0, "creadoen": ahora, "next_run_at": ahora}},
-                upsert=True,
-            ))
-            if len(bulk) >= 1000:
-                colatesis.bulk_write(bulk, ordered=False)
-                bulk = []
-    if bulk:
-        colatesis.bulk_write(bulk, ordered=False)
-    meta.update_one({"tipo": "colainicializada"}, {"$set": {"fecha": ahora}}, upsert=True)
-    print("Cola de tesis inicializada.")
-
 def procesartesisdoc(doccola):
     registroid = str(doccola.get("registro", "")).strip()
     if not registroid:
@@ -491,7 +451,8 @@ def workerloop():
 
     backfill_cola_campos(colatesis)
     backfill_cola_campos(colatfja)
-    inicializarcolatesis()
+    
+    # <- Se eliminó inicializarcolatesis() aquí
 
     tiempos = deque(maxlen=20)
     erroresscjnconsecutivos = 0
@@ -541,5 +502,5 @@ def workerloop():
             time.sleep(1)
 
 if __name__ == "__main__":
-    iniciar_servidor_health()   # ← arranca el HTTP server en hilo separado
+    iniciar_servidor_health()
     workerloop()
