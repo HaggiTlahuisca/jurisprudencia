@@ -22,10 +22,3 @@ primary_region = "lax"
   cpus = 2
   memory_mb = 2048
   processes = ["worker"]
-
-# ── Política de apagado por proceso ───────────────────
-# Esto sí aplica al worker (a diferencia de [http_service])
-[[services]]
-  processes = ["worker"]
-  auto_stop_machines = "off"
-  auto_start_machines = false
