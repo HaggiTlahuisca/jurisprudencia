@@ -1,23 +1,24 @@
 import os
-import time
-import random
-import json
-import threading
-from datetime import datetime, timedelta
-from collections import deque
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-import requests
-from dotenv import load_dotenv
-from pymongo import MongoClient
-from pymongo import UpdateOne, ReturnDocument
-from openai import OpenAI
+print("=== DEBUG worker.py iniciado ===")
 
 load_dotenv()
+print("1. dotenv cargado")
 
-# =========================
-# Config base
-# =========================
+MONGOURI = os.getenv("MONGO_URI")
+print(f"2. MONGO_URI len: {len(MONGOURI) if MONGOURI else 0}")
+
+OPENAIAPIKEY = os.getenv("OPENAI_API_KEY")
+print(f"3. OPENAI_API_KEY len: {len(OPENAIAPIKEY) if OPENAIAPIKEY else 0}")
+
+if not MONGOURI:
+    print("ERROR: Falta MONGO_URI")
+    exit(1)
+if not OPENAIAPIKEY:
+    print("ERROR: Falta OPENAI_API_KEY")
+    exit(1)
+
+print("4. Variables OK, importando pymongo...")
+
 MONGOURI = os.getenv("MONGO_URI")
 DBNAME = os.getenv("MONGODB_DB", "tepantlatia_db")
 OPENAIAPIKEY = os.getenv("OPENAI_API_KEY")
