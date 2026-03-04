@@ -4,4 +4,6 @@ python-dotenv
 openai
 fastapi
 uvicorn[standard]
-httpx
+PyJWT[crypto]>=2.8.0
+httpx>=0.27.0
+
